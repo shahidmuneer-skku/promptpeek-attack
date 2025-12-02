@@ -1,1 +1,0 @@
-python3 -m sglang.launch_server --model Qwen/Qwen2.5-1.5B-Instruct --log-level info --device=cuda --chunked-prefill-size=-1 --schedule-policy lpm --enable-deterministic-inference
