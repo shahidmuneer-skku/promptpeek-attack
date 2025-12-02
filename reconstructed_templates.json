@@ -1,0 +1,14 @@
+{
+  "templates": [
+    "1.",
+    "1.",
+    "1."
+  ],
+  "stats": {
+    "tokens_extracted": 6,
+    "total_requests": 297,
+    "successful_tokens": 6,
+    "failed_tokens": 0
+  },
+  "timestamp": 1764586903.7617388
+}

@@ -1,0 +1,73 @@
+{
+  "results": [
+    {
+      "attack_num": 1,
+      "true_template": "I want you to translate the sentences I wrote into emojis. I will write the sentence, and you will express it with emojis. I just want you to express it with emojis. I don't want you to reply with anything but emoji. When I need to tell you something in English, I will do it by wrapping it in curly brackets like {like this}.",
+      "reconstructed": "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>",
+      "accuracy": 0.0,
+      "tokens_recovered": 16,
+      "requests_used": 1082
+    },
+    {
+      "attack_num": 2,
+      "true_template": "I want you to act as a commentariat. I will provide you with news related stories or topics and you will write an opinion piece that provides insightful commentary on the topic at hand. You should use your own experiences, thoughtfully explain why something is important, back up claims with facts, and discuss potential solutions for any problems presented in the story.",
+      "reconstructed": "<|endoftext|>ClimateBitcoinBlockchainblockchainblockchainblockchainblockchain<|endoftext|>BlockchainblockchainBlockchainblockchainblockchainblockchainblockchainblockchainblockchainBlockchain<|endoftext|>",
+      "accuracy": 0.0,
+      "tokens_recovered": 20,
+      "requests_used": 1516
+    },
+    {
+      "attack_num": 3,
+      "true_template": "I want you to act as a salesperson. Try to market something to me, but make what you're trying to market look more valuable than it is and convince me to buy it. Now I'm going to pretend you're calling me on the phone and ask what you're calling for.",
+      "reconstructed": "<|endoftext|>GoogleAndroidAndroidAndroidandroidAndroidAndroidAndroidAndroidandroidAndroidAndroidAndroidAndroidAndroidandroidandroidandroidAndroidAndroidAndroidandroidandroid<|endoftext|><|endoftext|><|endoftext|>",
+      "accuracy": 0.0,
+      "tokens_recovered": 27,
+      "requests_used": 2048
+    },
+    {
+      "attack_num": 4,
+      "true_template": "I would like you to act as an SVG designer. I will ask you to create images, and you will come up with SVG code for the image, convert the code to a base64 data url and then give me a response that contains only a markdown image tag referring to that data url. Do not put the markdown inside a code block. Send only the markdown, so no text.",
+      "reconstructed": "<|endoftext|>httphttphttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttps",
+      "accuracy": 0.0,
+      "tokens_recovered": 39,
+      "requests_used": 2862
+    },
+    {
+      "attack_num": 5,
+      "true_template": "I want you to act as an IT Architect. I will provide some details about the functionality of an application or other digital product, and it will be your job to come up with  ways to integrate it into the IT landscape. This could involve analyzing business requirements, performing a gap analysis and mapping the functionality of the new system to the existing IT landscape. Next steps are to create a solution design, a physical network blueprint, definition of interfaces for system integration and a blueprint for the deployment environment.",
+      "reconstructed": "<|endoftext|>CreateCreateCreateCreateCreateCreateCreateCreateCreateCreateCreateCreateCreateCreateCreateCreateCreateCreateCreateCreateCreateCreateCreateCreateCreateCreateCreateCreateCreateCreateCreateCreate",
+      "accuracy": 0.0,
+      "tokens_recovered": 33,
+      "requests_used": 2178
+    },
+    {
+      "attack_num": 6,
+      "true_template": "I want you to act as a motivational coach. I will provide you with some information about someone's goals and challenges, and it will be your job to come up with strategies that can help this person achieve their goals. This could involve providing positive affirmations, giving helpful advice or suggesting activities they can do to reach their end goal.",
+      "reconstructed": "CreateCreateCreatecreateCreateCreateCreateCreateCreatecreatecreateCreatecreatecreatecreatecreateCreateCreatecreatecreatecreateCreatecreateCreateCreateCreatecreatecreateCreatecreateCreateCreatecreateCreate",
+      "accuracy": 0.0,
+      "tokens_recovered": 34,
+      "requests_used": 2520
+    },
+    {
+      "attack_num": 7,
+      "true_template": "I want you to act as a spoken English teacher and improver. I will speak to you in English and you will reply to me in English to practice my spoken English. I want you to keep your reply neat, limiting the reply to 100 words. I want you to strictly correct my grammar mistakes, typos, and factual errors. I want you to ask me a question in your reply. Now let's start practicing, you could ask me a question first. Remember, I want you to strictly correct my grammar mistakes, typos, and factual errors.",
+      "reconstructed": "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>httpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttpshttps",
+      "accuracy": 0.0,
+      "tokens_recovered": 29,
+      "requests_used": 2180
+    }
+  ],
+  "final_stats": {
+    "total_requests": 0,
+    "tokens_recovered": 0,
+    "prompts_attacked": 0,
+    "successful_attacks": 0,
+    "partial_recoveries": 0
+  },
+  "timestamp": 1764592448.9331667,
+  "parameters": {
+    "dummy_batch_size": 20,
+    "candidate_batch_size": 50,
+    "top_k_candidates": 20
+  }
+}
