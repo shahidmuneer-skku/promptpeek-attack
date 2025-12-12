@@ -11,10 +11,15 @@ import torch
 from datasets import load_dataset
 from collections import defaultdict, deque
 
+import json
+import time
+import aiohttp
+from typing import Tuple, Dict
 # ==================== CONFIGURATION ====================
 SGLANG_URL = "http://localhost:30000/generate"
 DATASET_NAME = "fka/awesome-chatgpt-prompts"
-SERVER_MODEL = "meta-llama/Llama-2-13b-chat-hf"  # Should match SGLang server
+SERVER_MODEL = "Qwen/Qwen3-0.6B"  # Should match SGLang server
+# SERVER_MODEL = "meta-llama/Llama-2-13b-chat-hf"  # Should match SGLang server
 
 # Attack parameters
 MAX_OUTPUT_TOKENS = 1
@@ -260,45 +265,121 @@ class RealisticSGLangClient:
         self.url = url
         self.kv_simulator = KVCacheSimulator()
         self.request_history = []
-        
+
     async def send_request(self, prompt: str, max_tokens: int = 1, 
-                          track_kv: bool = False) -> Tuple[str, float, Dict]:
-        """Send request and simulate KV cache behavior"""
+                        track_kv: bool = False) -> Tuple[str, float, Dict]:
+        """Send request and simulate KV cache behavior with Streaming"""
         
+        # 1. Enable streaming in the payload
         payload = {
             "text": prompt,
             "max_tokens": max_tokens,
             "temperature": 0.0,
-            "top_p": 1.0
+            "top_p": 1.0,
+            "stream": True  # <--- vital for token-by-token generation
         }
         
         start_time = time.time()
+        full_response_text = ""
+        first_token_latency = None
         
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(self.url, json=payload) as response:
                     if response.status == 200:
-                        result = await response.json()
-                        response_text = result.get("text", "")
-                        latency = time.time() - start_time
                         
-                        # Simulate KV cache update
+                        # 2. Iterate over the response stream line by line
+                        async for line in response.content:
+                            line = line.decode('utf-8').strip()
+                            
+                            # Skip empty keep-alive lines
+                            if not line:
+                                continue
+                                
+                            # Standard LLM streaming format usually starts with "data: "
+                            if line.startswith("data:"):
+                                data_str = line[5:].strip() # Remove "data: " prefix
+                                
+                                # Check for the stop signal (common in OpenAI-compatible APIs)
+                                if data_str == "[DONE]":
+                                    break
+                                
+                                try:
+                                    chunk = json.loads(data_str)
+                                    
+                                    # Extract text based on standard API formats
+                                    # Adjust key access depending on your specific SGLang endpoint version
+                                    text_chunk = chunk.get("text", "") 
+                                    
+                                    if text_chunk:
+                                        # Record Time to First Token (TTFT)
+                                        if first_token_latency is None:
+                                            first_token_latency = time.time() - start_time
+                                            
+                                        full_response_text += text_chunk
+                                        
+                                except json.JSONDecodeError:
+                                    continue
+
+                        total_latency = time.time() - start_time
+                        
+                        # 3. Simulate KV cache update (done after full response is received)
                         if track_kv:
                             self.kv_simulator.add_to_cache(prompt)
                             lpm_score = self.kv_simulator.get_lpm_score(prompt)
                         else:
                             lpm_score = 0
                         
-                        return response_text, latency, {
+                        return full_response_text, total_latency, {
                             'prompt': prompt,
                             'kv_hit': lpm_score > 0,
                             'lpm_score': lpm_score,
-                            'timestamp': start_time
+                            'timestamp': start_time,
+                            'ttft': first_token_latency # Added metric for streaming
                         }
                     else:
                         return f"ERROR_{response.status}", time.time() - start_time, {}
+                        
         except Exception as e:
             return f"ERROR_{str(e)}", time.time() - start_time, {}
+    # async def send_request(self, prompt: str, max_tokens: int = 1, 
+    #                       track_kv: bool = False) -> Tuple[str, float, Dict]:
+    #     """Send request and simulate KV cache behavior"""
+        
+    #     payload = {
+    #         "text": prompt,
+    #         "max_tokens": max_tokens,
+    #         "temperature": 0.0,
+    #         "top_p": 1.0
+    #     }
+        
+    #     start_time = time.time()
+        
+    #     try:
+    #         async with aiohttp.ClientSession() as session:
+    #             async with session.post(self.url, json=payload) as response:
+    #                 if response.status == 200:
+    #                     result = await response.json()
+    #                     response_text = result.get("text", "")
+    #                     latency = time.time() - start_time
+                        
+    #                     # Simulate KV cache update
+    #                     if track_kv:
+    #                         self.kv_simulator.add_to_cache(prompt)
+    #                         lpm_score = self.kv_simulator.get_lpm_score(prompt)
+    #                     else:
+    #                         lpm_score = 0
+                        
+    #                     return response_text, latency, {
+    #                         'prompt': prompt,
+    #                         'kv_hit': lpm_score > 0,
+    #                         'lpm_score': lpm_score,
+    #                         'timestamp': start_time
+    #                     }
+    #                 else:
+    #                     return f"ERROR_{response.status}", time.time() - start_time, {}
+    #     except Exception as e:
+    #         return f"ERROR_{str(e)}", time.time() - start_time, {}
     
     async def send_batch(self, prompts: List[str], max_tokens: int = 1) -> List[Tuple[str, float, Dict]]:
         """Send batch of requests with simulated LPM scheduling"""
@@ -468,7 +549,7 @@ class RealisticPromptPeekAttacker:
         
         reconstructed = ""
         attempts = 0
-        max_attempts = max_tokens * 200  # Allow 3 attempts per token
+        max_attempts = max_tokens * 100  # Allow 3 attempts per token
     
         while len(reconstructed.split()) < max_tokens and attempts < max_attempts:
             attempts += 1
@@ -504,9 +585,9 @@ class RealisticPromptPeekAttacker:
                         reconstructed += ' '
             
             # Avoid infinite loops
-            if attempts > 10:
-                print("[Reconstruction] Too many failed attempts, stopping")
-                break
+            # if attempts > 10:
+            #     print("[Reconstruction] Too many failed attempts, stopping")
+            #     break
         
         return reconstructed
     

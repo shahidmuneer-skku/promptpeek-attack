@@ -11,9 +11,9 @@ from datasets import load_dataset
 
 # ==================== CONFIGURATION ====================
 SGLANG_URL = "http://localhost:30000/generate"
-LOCAL_MODEL_PATH = "Qwen/Qwen2.5-1.5B-Instruct"  # Or use same as server: "meta-llama/Llama-2-13b-chat-hf"
+SERVER_MODEL = "Qwen/Qwen3-0.6B-FP8"  # Should match SGLang server
 DATASET_NAME = "fka/awesome-chatgpt-prompts"
-
+LOCAL_MODEL_PATH ="Qwen/Qwen3-0.6B"
 # Attack parameters from paper
 MAX_OUTPUT_TOKENS = 1
 DUMMY_BATCH_SIZE = 20  # Should exceed server's max batch size
@@ -76,8 +76,7 @@ class ImprovedLocalLLM:
         self.model = AutoModelForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.float16,
-            device_map="auto",
-            load_in_8bit=True  # Reduce memory usage
+            device_map="auto"
         )
         self.model.eval()
         print("Local LLM loaded successfully")
@@ -150,35 +149,185 @@ class EnhancedSGLangClient:
         self.url = url
         self.request_counter = 0
         
-    async def send_request(self, prompt: str, max_tokens: int = 1, stream: bool = False) -> Tuple[str, float]:
-        """Send request and measure response time"""
+    async def send_request(self, prompt: str, max_tokens: int = 1, 
+                        track_kv: bool = False) -> Tuple[str, float, Dict]:
+        """Send request and simulate KV cache behavior with Streaming"""
+        
+        # 1. Enable streaming in the payload
         payload = {
             "text": prompt,
             "max_tokens": max_tokens,
             "temperature": 0.0,
             "top_p": 1.0,
-            "stream": stream
+            "stream": True  # <--- vital for token-by-token generation
         }
         
         start_time = time.time()
+        full_response_text = ""
+        first_token_latency = None
+        
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(self.url, json=payload) as response:
                     if response.status == 200:
-                        result = await response.json()
-                        end_time = time.time()
-                        self.request_counter += 1
-                        return result.get("text", ""), end_time - start_time
+                        
+                        # 2. Iterate over the response stream line by line
+                        async for line in response.content:
+                            line = line.decode('utf-8').strip()
+                            
+                            # Skip empty keep-alive lines
+                            if not line:
+                                continue
+                                
+                            # Standard LLM streaming format usually starts with "data: "
+                            if line.startswith("data:"):
+                                data_str = line[5:].strip() # Remove "data: " prefix
+                                
+                                # Check for the stop signal (common in OpenAI-compatible APIs)
+                                if data_str == "[DONE]":
+                                    break
+                                
+                                try:
+                                    chunk = json.loads(data_str)
+                                    
+                                    # Extract text based on standard API formats
+                                    # Adjust key access depending on your specific SGLang endpoint version
+                                    text_chunk = chunk.get("text", "") 
+                                    
+                                    if text_chunk:
+                                        # Record Time to First Token (TTFT)
+                                        if first_token_latency is None:
+                                            first_token_latency = time.time() - start_time
+                                            
+                                        full_response_text += text_chunk
+                                        
+                                except json.JSONDecodeError:
+                                    continue
+
+                        total_latency = time.time() - start_time
+                        
+                        # 3. Simulate KV cache update (done after full response is received)
+                        if track_kv:
+                            self.kv_simulator.add_to_cache(prompt)
+                            lpm_score = self.kv_simulator.get_lpm_score(prompt)
+                        else:
+                            lpm_score = 0
+                        
+                        return full_response_text, total_latency, {
+                            'prompt': prompt,
+                            'kv_hit': lpm_score > 0,
+                            'lpm_score': lpm_score,
+                            'timestamp': start_time,
+                            'ttft': first_token_latency # Added metric for streaming
+                        }
                     else:
-                        return f"ERROR_{response.status}", time.time() - start_time
+                        return f"ERROR_{response.status}", time.time() - start_time, {}
+                        
         except Exception as e:
-            return f"ERROR_{str(e)}", time.time() - start_time
-    
+            return f"ERROR_{str(e)}", time.time() - start_time, {}
+
+    async def send_iterative_request(self, prompt: str, max_tokens: int = 1, 
+                                     track_kv: bool = False) -> Tuple[str, float, Dict]:
+        """
+        Sends iterative requests to the LLM, querying one token at a time
+        and simulating the KV cache (LPM) update after each token is received.
+        """
+        
+        current_prompt = prompt
+        full_response_text = ""
+        
+        start_time = time.time()
+        first_token_latency = None
+        
+        # We need a ClientSession that persists across all iterative calls
+        async with aiohttp.ClientSession() as session:
+            
+            # Loop for the desired number of tokens
+            for i in range(max_tokens):
+                
+                payload = {
+                    # Send the full history as the prompt for the next token
+                    "text": current_prompt,
+                    # We only request one new token per iteration
+                    "max_tokens": 1, 
+                    "temperature": 0.0,
+                    "top_p": 1.0,
+                    "stream": True # Streaming is still the fastest way to get one token
+                }
+                
+                try:
+                    # Time the current request
+                    iter_start_time = time.time()
+                    
+                    async with session.post(self.url, json=payload) as response:
+                        if response.status != 200:
+                            return f"ERROR_{response.status}", time.time() - start_time, {}
+                        
+                        new_token = ""
+                        # Iterate over the one-token response stream
+                        async for line in response.content:
+                            line = line.decode('utf-8').strip()
+                            if line.startswith("data:"):
+                                data_str = line[5:].strip()
+                                if data_str == "[DONE]":
+                                    break
+                                
+                                try:
+                                    chunk = json.loads(data_str)
+                                    text_chunk = chunk.get("text", "") 
+                                    if text_chunk:
+                                        new_token += text_chunk
+                                        # For a single token, this is usually all we need
+                                        break 
+                                except json.JSONDecodeError:
+                                    continue
+                        
+                        if not new_token:
+                            # Break if the model returns nothing (e.g., hits EOS)
+                            break 
+
+                        # --- LPM/KV Cache Logic Applied Per-Token ---
+                        
+                        # 1. Update the full response and the prompt for the next iteration
+                        full_response_text += new_token
+                        current_prompt += new_token
+
+                        # 2. Record TTFT on the first iteration
+                        if i == 0:
+                            first_token_latency = time.time() - iter_start_time
+                            
+                        # 3. Simulate KV cache update (LPM) on the full, expanded sequence
+                        if track_kv:
+                            # Add the *new full* prompt (P + t1 + t2...) to simulate saving cache
+                            self.kv_simulator.add_to_cache(current_prompt) 
+                            # Check LPM score on the sequence just sent
+                            # (This is more realistically done *before* the request for an LPM scheduler)
+                            lpm_score_current = self.kv_simulator.get_lpm_score(current_prompt)
+                            # You would typically store lpm_score_current in the results per token
+                            
+                        # ---------------------------------------------
+
+                except Exception as e:
+                    return f"ERROR_{str(e)}", time.time() - start_time, {}
+
+        # Final Latency and Results
+        total_latency = time.time() - start_time
+        
+        # Calculate final LPM score on the final prompt
+        final_lpm_score = self.kv_simulator.get_lpm_score(current_prompt) if track_kv else 0
+
+        return full_response_text, total_latency, {
+            'prompt_sent': prompt,
+            'kv_hit': final_lpm_score > 0,
+            'lpm_score': final_lpm_score,
+            'timestamp': start_time,
+            'ttft': first_token_latency
+        }
     async def send_batch_with_order_tracking(self, prompts: List[str]) -> List[Tuple[str, float, int]]:
         """Send batch and track response order"""
         tasks = []
         for i, prompt in enumerate(prompts):
-            task = self.send_request(prompt, MAX_OUTPUT_TOKENS)
+            task = self.send_iterative_request(prompt, MAX_OUTPUT_TOKENS)
             tasks.append((i, task))
         
         # Gather results with order tracking
@@ -227,7 +376,8 @@ class EnhancedPromptPeekAttacker:
         batch_size = 16
         for i in range(0, len(base_prompts), batch_size):
             batch = base_prompts[i:i+batch_size]
-            await asyncio.gather(*[self.client.send_request(p, max_tokens=128) for p in batch])
+            print(batch)
+            await asyncio.gather(*[self.client.send_iterative_request(p, max_tokens=128) for p in batch])
             
         print("[Attacker] KV cache flushed")
         await asyncio.sleep(1)  # Wait for victim prompts to accumulate
