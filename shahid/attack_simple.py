@@ -255,11 +255,19 @@ class InferenceClient:
         and extracting the latency/LPM metric from the first chunk.
         """
         
+        # payload = {
+        #     "model": "Qwen/Qwen2.5-1.5B-Instruct",
+        #     "text": full_sequence, #[{"role": "user", "content": full_sequence}],
+        #     "max_new_tokens": 1,
+        #     "stream": True # Essential for per-token access
+        # }
+
         payload = {
             "model": "Qwen/Qwen2.5-1.5B-Instruct",
-            "text": full_sequence, #[{"role": "user", "content": full_sequence}],
-            "max_new_tokens": 1,
-            "stream": True # Essential for per-token access
+            "text": full_sequence,
+            "max_new_tokens": 10,  # Generate some tokens to ensure caching
+            "stream": False,
+            "ignore_eos": True  # If supported by your SGLang version
         }
         
         start_time = time.time()
